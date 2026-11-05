@@ -96,7 +96,7 @@ VIOLATION_PATTERNS = [
 # 数据模型
 # ---------------------------------------------------------------------------
 class TriageRequest(BaseModel):
-    content: str = Field(..., min_length=1, description="用户工单内容")
+    content: str = Field(..., description="用户工单内容")
 
 
 class TriageResponse(BaseModel):
