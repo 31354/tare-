@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -20,6 +21,47 @@ from pydantic import BaseModel, Field
 # 环境变量（验收标准 5：无硬编码 API Key）
 # ---------------------------------------------------------------------------
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+LLM_MODEL = os.environ.get("LLM_MODEL", "glm-4-flash")  # 免费最快
+LLM_API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+_HAS_LLM = bool(LLM_API_KEY)
+
+# ---------------------------------------------------------------------------
+# LLM 调用工具（有 Key 就用，无 Key / 失败都返回 None 让调用方降级）
+# ---------------------------------------------------------------------------
+def _llm_call(system_prompt: str, user_prompt: str, expect_json: bool = True) -> Optional[str]:
+    """调智谱 LLM，失败返回 None。expect_json=True 时要求返回可解析 JSON。"""
+    if not _HAS_LLM:
+        return None
+    try:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        resp = httpx.post(
+            LLM_API_URL,
+            headers={
+                "Authorization": f"Bearer {LLM_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": LLM_MODEL,
+                "messages": messages,
+                "temperature": 0.1,   # 低温度保证稳定
+                "max_tokens": 512,
+                "response_format": {"type": "json_object"} if expect_json else None,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        if not content:
+            return None
+        if expect_json:
+            json.loads(content)  # 验证能解析
+        return content
+    except Exception:
+        return None
 
 # ---------------------------------------------------------------------------
 # SQLite 持久化存储
@@ -109,10 +151,30 @@ class TriageResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Agent 1 — Router Agent
+# Agent 1 — Router Agent（有 LLM 用语义分类，无 LLM 降级关键词匹配）
 # ---------------------------------------------------------------------------
+_ROUTER_SYSTEM = (
+    "你是一个工单分诊 Router，判断用户工单属于哪一类。"
+    "只输出 {\"category\": \"账单\"} / {\"category\": \"技术\"} / {\"category\": \"售后\"} 三种之一的 JSON。"
+    "账单=发票/支付/退款/扣费；技术=报错/闪退/无法登录；售后=退货/换货/破损/投诉。"
+)
+
+
 def router_agent(content: str) -> str:
     """根据关键词判断工单类型：技术 / 账单 / 售后 / 售后(默认)"""
+    # --- 优先 LLM 语义分类 ---
+    if _HAS_LLM:
+        raw = _llm_call(_ROUTER_SYSTEM, f"用户工单：{content}")
+        if raw:
+            try:
+                data = json.loads(raw)
+                cat = data.get("category", "")
+                if cat in ("账单", "技术", "售后"):
+                    return cat
+            except Exception:
+                pass
+
+    # --- 降级：关键词匹配 ---
     scores: Dict[str, int] = {k: 0 for k in CATEGORY_KEYWORDS}
     lower = content.lower()
     for cat, kws in CATEGORY_KEYWORDS.items():
@@ -126,8 +188,30 @@ def router_agent(content: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Agent 2 — Specialist Agent（共享逻辑，按 category 分支）
+# Agent 2 — Specialist Agent（有 LLM 用自然话术，无 LLM 降级模板分支）
 # ---------------------------------------------------------------------------
+_SPECIALIST_SYSTEM = (
+    "你是智能客服专员，根据工单分类和用户内容，生成一段 80 字以内的处理建议。"
+    "要求：专业、友好、不出现'保证''一定''100%'等绝对化承诺词。"
+    "只输出 {\"suggestion\": \"...\"} 的 JSON，不要其他内容。"
+)
+
+
+def _llm_suggestion(category: str, content: str) -> Optional[str]:
+    """LLM 生成自然话术建议，失败返回 None"""
+    prompt = f"工单分类：{category}\n用户原话：{content}\n请生成处理建议。"
+    raw = _llm_call(_SPECIALIST_SYSTEM, prompt)
+    if raw:
+        try:
+            data = json.loads(raw)
+            s = data.get("suggestion", "").strip()
+            if s and len(s) >= 10:
+                return s
+        except Exception:
+            pass
+    return None
+
+
 def _calc_priority(content: str) -> str:
     lower = content.lower()
     for keywords, p in PRIORITY_RULES:
@@ -138,6 +222,13 @@ def _calc_priority(content: str) -> str:
 
 
 def _build_suggestion(category: str, content: str) -> str:
+    """有 LLM 优先用自然话术，无 LLM / 失败降级模板"""
+    # --- 优先 LLM ---
+    llm_sug = _llm_suggestion(category, content)
+    if llm_sug:
+        return llm_sug + "\n\n💡 （AI 生成）"
+
+    # --- 降级：模板分支 ---
     if category == "账单":
         if "发票" in content or "抬头" in content or "税号" in content:
             return "请提供正确的发票抬头（公司全称或个人姓名）及税号，财务专员将在 1 个工作日内重新开具。"
@@ -207,10 +298,35 @@ def specialist_agent(category: str, content: str) -> Dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Agent 3 — QA Agent
+# Agent 3 — QA Agent（有 LLM 用语义审核，无 LLM 降级关键词正则）
 # ---------------------------------------------------------------------------
+_QA_SYSTEM = (
+    "你是 QA 质检，检查客服输出是否合格。不合格原因："
+    "1) 字段为空；2) 含'保证''一定解决''100%'等绝对化承诺；3) 建议含糊不专业。"
+    "只输出 {\"pass\": true} 或 {\"pass\": false, \"reason\": \"...\"} 的 JSON。"
+)
+
+
 def qa_agent(result: Dict[str, str]) -> Optional[str]:
-    """质检：返回 None 表示合格，否则返回违规原因"""
+    """质检：返回 None 表示合格，否则返回违规原因。有 LLM 用语义审核，无 LLM 降级正则"""
+    # --- 优先 LLM 语义审核 ---
+    if _HAS_LLM:
+        required_ok = all(v and str(v).strip() for v in result.values())
+        if not required_ok:
+            return "存在空字段"
+        text = json.dumps(result, ensure_ascii=False)
+        raw = _llm_call(_QA_SYSTEM, f"客服输出：{text}")
+        if raw:
+            try:
+                data = json.loads(raw)
+                if not data.get("pass", True):
+                    return data.get("reason", "输出不合格")
+                return None  # LLM 说合格
+            except Exception:
+                pass
+        # LLM 调用失败 → 降级下面的正则检查（不直接放行）
+
+    # --- 降级：关键词正则检查 ---
     required = ["category", "priority", "assignee", "suggestion"]
     for k in required:
         v = result.get(k)
@@ -312,7 +428,14 @@ def health():
     conn = _get_conn()
     count = conn.execute("SELECT COUNT(*) FROM tickets").fetchone()[0]
     conn.close()
-    return {"status": "ok", "tickets": count, "db": _DB_PATH, "mcp_tools": list_tools_sync()}
+    return {
+        "status": "ok",
+        "tickets": count,
+        "db": _DB_PATH,
+        "mcp_tools": list_tools_sync(),
+        "llm_enabled": _HAS_LLM,
+        "llm_model": LLM_MODEL if _HAS_LLM else None,
+    }
 
 
 @app.get("/tickets/{ticket_id}")
