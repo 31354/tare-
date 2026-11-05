@@ -3,28 +3,58 @@
 Router Agent → Specialist Agent → QA Agent
 """
 from __future__ import annotations
+import json
 import os
 import re
+import sqlite3
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
 # 环境变量（验收标准 5：无硬编码 API Key）
 # ---------------------------------------------------------------------------
-# 本项目使用规则+关键词实现 Agent，不需要 LLM API Key。
-# 仍保留一个占位环境变量以满足工程规范要求。
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 
 # ---------------------------------------------------------------------------
-# 内存存储（模拟数据库）
+# SQLite 持久化存储
 # ---------------------------------------------------------------------------
-TICKETS: Dict[str, Dict[str, Any]] = {}
+# Railway 容器内数据目录；本地开发用项目根目录
+_DB_PATH = os.environ.get("DB_PATH", str(Path(__file__).resolve().parent / "tickets.db"))
+
+
+def _get_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _init_db() -> None:
+    conn = _get_conn()
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tickets (
+            ticket_id   TEXT PRIMARY KEY,
+            content     TEXT NOT NULL,
+            category    TEXT NOT NULL,
+            priority    TEXT NOT NULL,
+            assignee    TEXT NOT NULL,
+            suggestion  TEXT NOT NULL,
+            trace       TEXT NOT NULL,
+            created_at  TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+_init_db()
 
 # ---------------------------------------------------------------------------
 # 关键词词典
@@ -199,7 +229,23 @@ def run_pipeline(content: str) -> Dict[str, Any]:
         **result,
         "trace": trace,
     }
-    TICKETS[ticket_id] = ticket
+    # 写入 SQLite
+    conn = _get_conn()
+    conn.execute(
+        "INSERT INTO tickets (ticket_id, content, category, priority, assignee, suggestion, trace, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            ticket["ticket_id"],
+            ticket["content"],
+            ticket["category"],
+            ticket["priority"],
+            ticket["assignee"],
+            ticket["suggestion"],
+            json.dumps(ticket["trace"], ensure_ascii=False),
+            ticket["created_at"],
+        ),
+    )
+    conn.commit()
+    conn.close()
     return ticket
 
 
@@ -227,15 +273,22 @@ def triage(req: TriageRequest):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "tickets": len(TICKETS)}
+    conn = _get_conn()
+    count = conn.execute("SELECT COUNT(*) FROM tickets").fetchone()[0]
+    conn.close()
+    return {"status": "ok", "tickets": count, "db": _DB_PATH}
 
 
 @app.get("/tickets/{ticket_id}")
 def get_ticket(ticket_id: str):
-    t = TICKETS.get(ticket_id)
-    if not t:
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM tickets WHERE ticket_id = ?", (ticket_id,)).fetchone()
+    conn.close()
+    if not row:
         raise HTTPException(status_code=404, detail="工单不存在")
-    return t
+    ticket = dict(row)
+    ticket["trace"] = json.loads(ticket["trace"])
+    return ticket
 
 
 # 根路径返回前端页面
