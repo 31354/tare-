@@ -2,17 +2,57 @@
 mcp_server.py — 售后客服 MCP Server (MCP Python SDK v2)
 注册了 2 个 Tool：
   1. query_weather(city)        — 查天气（wttr.in，免费无 key）
-  2. query_express(tracking_no) — 查快递（mock 数据，模拟真实轨迹）
+  2. query_express(tracking_no, shipper_code) — 查快递（快递鸟真实 API，无 Key 时降级 mock）
+
+快递鸟免费注册：https://www.kdniao.com/
+注册后在 Railway Settings → Variables 里加：
+  KDN_ENTERPRISE_ID=你的企业ID
+  KDN_API_KEY=你的API Key
 """
 from __future__ import annotations
 import asyncio
+import hashlib
+import json
+import os
 import random
-from typing import Annotated
+import re
+from typing import Annotated, Optional
 
 import httpx
 from mcp.server import MCPServer
 
 mcp = MCPServer("售后客服 MCP Server")
+
+# ---------------------------------------------------------------------------
+# 环境变量：快递鸟 API Key（注册 https://www.kdniao.com/ 免费拿）
+# ---------------------------------------------------------------------------
+KDN_ENTERPRISE_ID = os.environ.get("KDN_ENTERPRISE_ID", "")
+KDN_API_KEY = os.environ.get("KDN_API_KEY", "")
+KDN_API_URL = "https://api.kdniao.com/Ebusiness/EbusinessOrderHandle.aspx"
+_HAS_KDN = bool(KDN_ENTERPRISE_ID and KDN_API_KEY)
+
+# ---------------------------------------------------------------------------
+# 快递公司编码识别（根据单号前缀/格式推断）
+# ---------------------------------------------------------------------------
+_SHIPPER_PATTERNS = [
+    ("SF", re.compile(r"^SF\d{10,15}$", re.I)),          # 顺丰
+    ("YTO", re.compile(r"^(YT|YTO)\d{12,15}$", re.I)),    # 圆通
+    ("ZTO", re.compile(r"^\d{12,15}$")),                   # 中通（纯数字）
+    ("STO", re.compile(r"^(STO|77)\d{12,15}$", re.I)),    # 申通
+    ("YD", re.compile(r"^(YD|D)\d{12,15}$", re.I)),       # 韵达
+    ("JD", re.compile(r"^(JD|V)\d{10,15}$", re.I)),       # 京东
+    ("EMS", re.compile(r"^[A-Z]{2}\d{9}[A-Z]{2}$", re.I)),  # EMS 国际
+    ("JD", re.compile(r"^(JDGA|JDX)\d{10,15}$", re.I)),   # 京东
+    ("YJ", re.compile(r"^(YJ|8)\d{12,15}$", re.I)),       # 极兔
+]
+
+
+def _detect_shipper(tracking_no: str) -> str:
+    """根据单号推断快递公司编码，推断不出默认 SF"""
+    for code, pat in _SHIPPER_PATTERNS:
+        if pat.match(tracking_no.strip()):
+            return code
+    return "SF"  # 默认顺丰（最常见）
 
 # ---------------------------------------------------------------------------
 # Tool 1 — 查天气（真实 API，wttr.in 完全免费无 key）
@@ -40,7 +80,7 @@ def query_weather(city: Annotated[str, "城市名，例如 北京 / Shanghai / �
 
 
 # ---------------------------------------------------------------------------
-# Tool 2 — 查快递（mock 数据，模拟真实轨迹）
+# Tool 2 — 查快递（优先快递鸟真实 API，无 Key 降级 mock）
 # ---------------------------------------------------------------------------
 _MOCK_TRACKING = [
     {"time": "2026-11-04 10:23", "status": "已签收", "detail": "本人已签收，感谢使用快递服务"},
@@ -52,33 +92,119 @@ _MOCK_TRACKING = [
 ]
 
 
+def _query_kdn(tracking_no: str, shipper_code: str) -> Optional[str]:
+    """调快递鸟真实 API，返回格式化结果；失败返回 None"""
+    try:
+        request_data = json.dumps({
+            "OrderCode": "",
+            "ShipperCode": shipper_code,
+            "LogisticCode": tracking_no,
+        })
+        sign_src = request_data + KDN_API_KEY
+        sign = hashlib.md5(sign_src.encode("utf-8")).hexdigest()
+        sign = sign.upper()
+
+        resp = httpx.post(
+            KDN_API_URL,
+            data={
+                "RequestData": request_data,
+                "EBusinessID": KDN_ENTERPRISE_ID,
+                "RequestType": "1002",       # 实时查询
+                "DataSign": sign,
+                "DataType": "2",              # JSON
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded;charset=utf-8"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        if not data.get("Success"):
+            return None  # API 业务失败，降级 mock
+
+        traces = data.get("Traces", [])
+        if not traces:
+            return None
+
+        # 快递鸟返回的 Traces 是倒序（最新在前）
+        latest = traces[0]
+        shipper = data.get("ShipperName", shipper_code)
+
+        lines = [f"📦 快递单号：{tracking_no}", f"🏢 快递公司：{shipper}",
+                 f"🚚 当前状态：{latest.get('StateName', latest.get('AcceptStatusText', '未知'))}", ""]
+        for t in traces[:5]:
+            accept_time = t.get("AcceptTime", "")
+            accept_station = t.get("AcceptStation", "")
+            lines.append(f"  [{accept_time}] {accept_station}")
+        if len(traces) > 5:
+            lines.append(f"  ... 共 {len(traces)} 条轨迹")
+
+        state_code = str(latest.get("State", ""))
+        if state_code == "3" or "签收" in latest.get("AcceptStation", ""):
+            lines.append("\n✅ 已签收完毕")
+        elif state_code == "2":
+            lines.append("\n⏰ 运输中，请耐心等待 📦")
+        elif state_code == "1":
+            lines.append("\n⏰ 已揽收，正在运输中")
+        else:
+            lines.append("")
+
+        return "\n".join(lines)
+    except Exception:
+        return None
+
+
 @mcp.tool()
-def query_express(tracking_no: Annotated[str, "快递单号，例如 SF1234567890"]) -> str:
+def query_express(
+    tracking_no: Annotated[str, "快递单号，例如 SF1234567890"],
+    shipper_code: Annotated[Optional[str], "快递公司编码（可选，不传自动识别）：SF=顺丰 YTO=圆通 ZTO=中通 JD=京东 EMS=邮政"] = None,
+) -> str:
     """查询快递物流轨迹。当用户问快递到哪了、什么时候到、发货了没有时调用。"""
-    if not tracking_no or len(tracking_no) < 5:
+    if not tracking_no or len(tracking_no.strip()) < 5:
         return "请提供有效的快递单号（至少 5 位），例如 SF1234567890"
 
-    # 根据单号生成稳定的 mock（同单号每次返回一样）
+    tracking_no = tracking_no.strip()
+    shipper = shipper_code or _detect_shipper(tracking_no)
+
+    # --- 优先快递鸟真实 API ---
+    if _HAS_KDN:
+        real_result = _query_kdn(tracking_no, shipper)
+        if real_result:
+            return f"【MCP · 快递查询（快递鸟实时）】\n{real_result}"
+
+    # --- 降级：mock 数据 ---
     rng = random.Random(tracking_no)
     pick = rng.choice([0, 1, 2, 3, 4, 5])
     steps = _MOCK_TRACKING[pick:]
 
-    lines = [f"📦 快递单号：{tracking_no}", f"🚚 当前状态：{steps[0]['status']}", ""]
+    shipper_map = {"SF": "顺丰", "YTO": "圆通", "ZTO": "中通", "JD": "京东", "EMS": "邮政"}
+    shipper_name = shipper_map.get(shipper, shipper)
+
+    lines = [
+        f"📦 快递单号：{tracking_no}",
+        f"🏢 快递公司：{shipper_name}",
+        f"🚚 当前状态：{steps[0]['status']}",
+        "",
+    ]
     for s in steps[:3]:
         lines.append(f"  [{s['time']}] {s['detail']}")
     if len(steps) > 3:
         lines.append(f"  ... 共 {len(steps)} 条轨迹")
 
+    lines.append("")
     if steps[0]["status"] == "已签收":
-        lines.append("\n✅ 已签收完毕")
+        lines.append("✅ 已签收完毕")
     elif steps[0]["status"] in ("派送中", "到达集散中心"):
-        lines.append("\n⏰ 预计今天送达，注意查收 🚪")
+        lines.append("⏰ 预计今天送达，注意查收 🚪")
     elif steps[0]["status"] == "运输中":
-        lines.append("\n⏰ 预计 1-2 天内送达 📦")
+        lines.append("⏰ 预计 1-2 天内送达 📦")
     else:
-        lines.append("\n⏰ 预计 3-5 天内送达")
+        lines.append("⏰ 预计 3-5 天内送达")
 
-    return "\n".join(lines)
+    if not _HAS_KDN:
+        lines.append("\n💡 提示：当前为模拟数据，配置快递鸟 API Key 后可查询真实轨迹")
+
+    return f"【MCP · 快递查询（模拟）】\n" + "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
