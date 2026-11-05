@@ -28,15 +28,21 @@ _HAS_LLM = bool(LLM_API_KEY)
 # ---------------------------------------------------------------------------
 # LLM 调用工具（有 Key 就用，无 Key / 失败都返回 None 让调用方降级）
 # ---------------------------------------------------------------------------
-def _llm_call(system_prompt: str, user_prompt: str, expect_json: bool = True) -> Optional[str]:
-    """调智谱 LLM，失败返回 None。expect_json=True 时要求返回可解析 JSON。"""
+def _llm_call(system_prompt: str, user_prompt: str, expect_json: bool = True, history: Optional[List[Dict]] = None) -> Optional[str]:
+    """调智谱 LLM，支持传入对话历史做上下文。失败返回 None。"""
     if not _HAS_LLM:
         return None
     try:
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
+        messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            # 把历史转成 LLM 能理解的 messages 格式（最多 8 条历史）
+            for h in history[-8:]:
+                role = h.get("role", "user")
+                content = h.get("content", "")
+                if role in ("user", "assistant"):
+                    messages.append({"role": role, "content": content})
+        messages.append({"role": "user", "content": user_prompt})
+
         resp = httpx.post(
             LLM_API_URL,
             headers={
@@ -46,7 +52,7 @@ def _llm_call(system_prompt: str, user_prompt: str, expect_json: bool = True) ->
             json={
                 "model": LLM_MODEL,
                 "messages": messages,
-                "temperature": 0.1,   # 低温度保证稳定
+                "temperature": 0.1,
                 "max_tokens": 512,
                 "response_format": {"type": "json_object"} if expect_json else None,
             },
@@ -58,7 +64,7 @@ def _llm_call(system_prompt: str, user_prompt: str, expect_json: bool = True) ->
         if not content:
             return None
         if expect_json:
-            json.loads(content)  # 验证能解析
+            json.loads(content)
         return content
     except Exception:
         return None
@@ -89,6 +95,30 @@ def _init_db() -> None:
             suggestion  TEXT NOT NULL,
             trace       TEXT NOT NULL,
             created_at  TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sessions (
+            session_id   TEXT PRIMARY KEY,
+            title        TEXT NOT NULL,
+            created_at   TEXT NOT NULL,
+            last_active  TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS messages (
+            msg_id       TEXT PRIMARY KEY,
+            session_id   TEXT NOT NULL,
+            role         TEXT NOT NULL,   -- 'user' or 'assistant'
+            content      TEXT NOT NULL,
+            category     TEXT,            -- null for assistant messages
+            suggestion   TEXT,            -- null for user messages
+            created_at   TEXT NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions(session_id)
         )
         """
     )
@@ -151,6 +181,105 @@ class TriageResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# 多轮对话数据模型
+# ---------------------------------------------------------------------------
+class ChatRequest(BaseModel):
+    content: str = Field(..., description="用户消息内容")
+    session_id: Optional[str] = Field(None, description="会话 ID（不传则新建会话）")
+
+
+class ChatResponse(BaseModel):
+    session_id: str
+    ticket_id: Optional[str] = None
+    reply: str
+    category: str
+    priority: str
+    assignee: str
+    trace: List[str]
+
+
+class SessionInfo(BaseModel):
+    session_id: str
+    title: str
+    created_at: str
+    last_active: str
+    message_count: int
+
+
+class MessageInfo(BaseModel):
+    msg_id: str
+    role: str
+    content: str
+    category: Optional[str] = None
+    suggestion: Optional[str] = None
+    created_at: str
+
+
+# ---------------------------------------------------------------------------
+# 会话管理工具
+# ---------------------------------------------------------------------------
+def _create_session(title: str = "新会话") -> str:
+    session_id = f"S{uuid.uuid4().hex[:10].upper()}"
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _get_conn()
+    conn.execute(
+        "INSERT INTO sessions (session_id, title, created_at, last_active) VALUES (?, ?, ?, ?)",
+        (session_id, title, now, now),
+    )
+    conn.commit()
+    conn.close()
+    return session_id
+
+
+def _get_or_create_session(session_id: Optional[str], title_hint: str = "新会话") -> str:
+    if session_id:
+        conn = _get_conn()
+        row = conn.execute("SELECT session_id FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
+        conn.close()
+        if row:
+            # 更新 last_active
+            conn = _get_conn()
+            conn.execute(
+                "UPDATE sessions SET last_active = ? WHERE session_id = ?",
+                (datetime.now(timezone.utc).isoformat(), session_id),
+            )
+            conn.commit()
+            conn.close()
+            return session_id
+    return _create_session(title_hint)
+
+
+def _save_message(session_id: str, role: str, content: str, category: Optional[str] = None, suggestion: Optional[str] = None) -> None:
+    msg_id = f"M{uuid.uuid4().hex[:8].upper()}"
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _get_conn()
+    conn.execute(
+        "INSERT INTO messages (msg_id, session_id, role, content, category, suggestion, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (msg_id, session_id, role, content, category, suggestion, now),
+    )
+    # 自动生成 session title（取第一条用户消息的前 20 字）
+    title_row = conn.execute("SELECT title FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
+    if title_row and title_row["title"] == "新会话" and role == "user":
+        new_title = content[:20] + ("..." if len(content) > 20 else "")
+        conn.execute("UPDATE sessions SET title = ? WHERE session_id = ?", (new_title, session_id))
+    conn.commit()
+    conn.close()
+
+
+def _get_session_history(session_id: str, max_turns: int = 6) -> List[Dict]:
+    """取最近 max_turns 轮对话历史（每条 user + assistant 算一轮）"""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT role, content FROM messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ?",
+        (session_id, max_turns * 2),
+    ).fetchall()
+    conn.close()
+    # 反转为正序
+    rows = list(reversed(rows))
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
 # Agent 1 — Router Agent（有 LLM 用语义分类，无 LLM 降级关键词匹配）
 # ---------------------------------------------------------------------------
 _ROUTER_SYSTEM = (
@@ -160,11 +289,11 @@ _ROUTER_SYSTEM = (
 )
 
 
-def router_agent(content: str) -> str:
-    """根据关键词判断工单类型：技术 / 账单 / 售后 / 售后(默认)"""
-    # --- 优先 LLM 语义分类 ---
+def router_agent(content: str, history: Optional[List[Dict]] = None) -> str:
+    """根据关键词判断工单类型，支持对话历史上下文"""
+    # --- 优先 LLM 语义分类（带历史上下文） ---
     if _HAS_LLM:
-        raw = _llm_call(_ROUTER_SYSTEM, f"用户工单：{content}")
+        raw = _llm_call(_ROUTER_SYSTEM, f"用户本轮输入：{content}", history=history)
         if raw:
             try:
                 data = json.loads(raw)
@@ -197,10 +326,13 @@ _SPECIALIST_SYSTEM = (
 )
 
 
-def _llm_suggestion(category: str, content: str) -> Optional[str]:
-    """LLM 生成自然话术建议，失败返回 None"""
-    prompt = f"工单分类：{category}\n用户原话：{content}\n请生成处理建议。"
-    raw = _llm_call(_SPECIALIST_SYSTEM, prompt)
+def _llm_suggestion(category: str, content: str, history: Optional[List[Dict]] = None) -> Optional[str]:
+    """LLM 生成自然话术建议，支持对话历史上下文。失败返回 None"""
+    history_hint = ""
+    if history:
+        history_hint = f"\n\n（对话历史供参考：{len(history)} 条消息）"
+    prompt = f"工单分类：{category}\n用户本轮输入：{content}{history_hint}\n请生成处理建议。"
+    raw = _llm_call(_SPECIALIST_SYSTEM, prompt, history=history)
     if raw:
         try:
             data = json.loads(raw)
@@ -221,10 +353,10 @@ def _calc_priority(content: str) -> str:
     return "中"
 
 
-def _build_suggestion(category: str, content: str) -> str:
-    """有 LLM 优先用自然话术，无 LLM / 失败降级模板"""
-    # --- 优先 LLM ---
-    llm_sug = _llm_suggestion(category, content)
+def _build_suggestion(category: str, content: str, history: Optional[List[Dict]] = None) -> str:
+    """有 LLM 优先用自然话术（支持上下文），无 LLM / 失败降级模板"""
+    # --- 优先 LLM（带上下文） ---
+    llm_sug = _llm_suggestion(category, content, history=history)
     if llm_sug:
         return llm_sug + "\n\n💡 （AI 生成）"
 
@@ -277,15 +409,15 @@ def _try_mcp_tools(content: str) -> Optional[str]:
     return None
 
 
-def specialist_agent(category: str, content: str) -> Dict[str, str]:
-    """专员 Agent：根据类型提取信息并生成初步建议，支持 MCP 外部 Tool"""
+def specialist_agent(category: str, content: str, history: Optional[List[Dict]] = None) -> Dict[str, str]:
+    """专员 Agent：根据类型提取信息并生成初步建议，支持 MCP 外部 Tool 和对话上下文"""
     priority = _calc_priority(content)
     assignee = ASSIGNEE_MAP[category]
 
     # 先尝试调 MCP Tool，拿到真实外部数据
     mcp_data = _try_mcp_tools(content)
 
-    suggestion = _build_suggestion(category, content)
+    suggestion = _build_suggestion(category, content, history=history)
     if mcp_data:
         suggestion = f"{mcp_data}\n\n📋 标准处理建议：\n{suggestion}"
 
@@ -342,22 +474,22 @@ def qa_agent(result: Dict[str, str]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 # 多 Agent 编排
 # ---------------------------------------------------------------------------
-def run_pipeline(content: str) -> Dict[str, Any]:
+def run_pipeline(content: str, history: Optional[List[Dict]] = None) -> Dict[str, Any]:
+    """多 Agent 编排：Router → Specialist → QA。history 传入对话历史做上下文"""
     trace: List[str] = []
 
-    # Router
-    category = router_agent(content)
+    # Router（带上下文）
+    category = router_agent(content, history=history)
     trace.append(f"Router→{category}")
 
-    # Specialist
-    result = specialist_agent(category, content)
+    # Specialist（带上下文的话术）
+    result = specialist_agent(category, content, history=history)
     trace.append(f"Specialist({category})→完成")
 
     # QA：不合格则打回重做一次
     violation = qa_agent(result)
     if violation is not None:
         trace.append(f"QA→不合格({violation})，打回重做")
-        # 重做：强制 suggestion 更保守、去除承诺词
         suggestion = result["suggestion"]
         for bad, good in [("保证", "建议"), ("一定", "可能"), ("100%", ""), ("包", "")]:
             suggestion = suggestion.replace(bad, good)
@@ -365,7 +497,6 @@ def run_pipeline(content: str) -> Dict[str, Any]:
         trace.append(f"Specialist(重做)→完成")
         violation2 = qa_agent(result)
         if violation2 is not None:
-            # 即使二次仍不合格，也返回结果（已尽力修复）
             trace.append(f"QA→二次仍存问题({violation2})，强制放行")
         else:
             trace.append("QA→二次合格")
@@ -420,6 +551,100 @@ def triage(req: TriageRequest):
         suggestion=ticket["suggestion"],
         trace=ticket["trace"],
     )
+
+
+# ---------------------------------------------------------------------------
+# 多轮对话端点
+# ---------------------------------------------------------------------------
+@app.post("/chat", response_model=ChatResponse)
+def chat(req: ChatRequest):
+    """多轮对话：发送消息，自动保持会话上下文"""
+    text = req.content.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="消息内容不能为空")
+
+    # 1. 找或创建会话
+    session_id = _get_or_create_session(req.session_id)
+
+    # 2. 取历史
+    history = _get_session_history(session_id)
+
+    # 3. 存用户消息
+    _save_message(session_id, "user", text)
+
+    # 4. 跑流水线（带历史上下文）
+    ticket = run_pipeline(text, history=history)
+
+    # 5. 存 Agent 回复
+    _save_message(
+        session_id, "assistant",
+        ticket["suggestion"],
+        category=ticket["category"],
+        suggestion=ticket["suggestion"],
+    )
+
+    return ChatResponse(
+        session_id=session_id,
+        ticket_id=ticket["ticket_id"],
+        reply=ticket["suggestion"],
+        category=ticket["category"],
+        priority=ticket["priority"],
+        assignee=ticket["assignee"],
+        trace=ticket["trace"],
+    )
+
+
+@app.post("/chat/sessions", response_model=SessionInfo)
+def create_session():
+    """手动创建新会话"""
+    session_id = _create_session()
+    conn = _get_conn()
+    count = conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)).fetchone()[0]
+    row = conn.execute("SELECT * FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
+    conn.close()
+    return SessionInfo(**dict(row), message_count=count)
+
+
+@app.get("/chat/sessions")
+def list_sessions():
+    """列出所有会话（按最后活跃倒序）"""
+    conn = _get_conn()
+    rows = conn.execute("SELECT * FROM sessions ORDER BY last_active DESC").fetchall()
+    sessions = []
+    for r in rows:
+        count = conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (r["session_id"],)).fetchone()[0]
+        sessions.append(SessionInfo(**dict(r), message_count=count))
+    conn.close()
+    return sessions
+
+
+@app.get("/chat/sessions/{session_id}")
+def get_session(session_id: str):
+    """获取会话历史消息"""
+    conn = _get_conn()
+    row = conn.execute("SELECT * FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    msgs = conn.execute(
+        "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC",
+        (session_id,),
+    ).fetchall()
+    conn.close()
+    return {
+        "session": dict(row),
+        "messages": [MessageInfo(**dict(m)) for m in msgs],
+    }
+
+
+@app.delete("/chat/sessions/{session_id}")
+def delete_session(session_id: str):
+    """删除会话及其所有消息"""
+    conn = _get_conn()
+    conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+    conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "session_id": session_id}
 
 
 @app.get("/health")

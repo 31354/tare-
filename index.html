@@ -2,106 +2,428 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>智能客服工单分诊系统</title>
+<title>智能售后客服 · 多 Agent 协作</title>
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background: #f5f7fa; min-height: 100vh; display: flex; justify-content: center; padding: 40px 16px; }
-  .container { width: 100%; max-width: 640px; }
-  h1 { font-size: 24px; color: #1a1a2e; margin-bottom: 8px; }
-  .subtitle { color: #666; font-size: 14px; margin-bottom: 24px; }
-  .card { background: #fff; border-radius: 12px; padding: 24px; box-shadow: 0 2px 12px rgba(0,0,0,.08); margin-bottom: 20px; }
-  textarea { width: 100%; min-height: 96px; padding: 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; resize: vertical; outline: none; transition: border-color .2s; }
-  textarea:focus { border-color: #4f46e5; }
-  .btn { margin-top: 12px; padding: 10px 24px; background: #4f46e5; color: #fff; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; transition: background .2s; }
-  .btn:hover { background: #4338ca; }
-  .btn:disabled { background: #a5b4fc; cursor: not-allowed; }
-  .error { margin-top: 12px; padding: 10px 12px; background: #fee2e2; color: #b91c1c; border-radius: 8px; font-size: 13px; display: none; }
-  .result { display: none; }
-  .result h3 { font-size: 16px; color: #1a1a2e; margin-bottom: 16px; }
-  .field { display: flex; padding: 8px 0; border-bottom: 1px solid #f0f0f0; font-size: 14px; }
-  .field:last-child { border-bottom: none; }
-  .field .label { color: #666; width: 90px; flex-shrink: 0; }
-  .field .value { color: #1a1a2e; font-weight: 500; flex: 1; }
-  .badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; }
-  .badge-tech { background: #dbeafe; color: #1e40af; }
-  .badge-bill { background: #fef3c7; color: #92400e; }
-  .badge-after { background: #dcfce7; color: #166534; }
-  .badge-low { background: #e5e7eb; color: #374151; }
-  .badge-mid { background: #fef3c7; color: #92400e; }
-  .badge-high { background: #fee2e2; color: #b91c1c; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: #f5f7fa;
+  height: 100vh;
+  display: flex;
+}
+
+/* ===== 左侧会话列表 ===== */
+.sidebar {
+  width: 260px;
+  background: #1a1a2e;
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+.sidebar-header {
+  padding: 20px 16px;
+  border-bottom: 1px solid rgba(255,255,255,.08);
+}
+.sidebar-header h1 { font-size: 16px; font-weight: 600; }
+.sidebar-header p { font-size: 11px; color: #888; margin-top: 4px; }
+.new-chat-btn {
+  margin: 12px;
+  padding: 10px;
+  background: #4f46e5;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background .2s;
+}
+.new-chat-btn:hover { background: #4338ca; }
+.session-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 8px;
+}
+.session-item {
+  padding: 10px 12px;
+  margin: 2px 0;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #ccc;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  transition: background .15s;
+}
+.session-item:hover { background: rgba(255,255,255,.06); color: #fff; }
+.session-item.active { background: rgba(79,70,229,.3); color: #fff; }
+.session-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-count { font-size: 11px; color: #666; margin-left: 8px; }
+
+/* ===== 主聊天区 ===== */
+.chat-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.chat-header {
+  padding: 16px 24px;
+  background: #fff;
+  border-bottom: 1px solid #e8e8ed;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.chat-header .title { font-size: 15px; font-weight: 600; color: #1a1a2e; }
+.chat-header .status { font-size: 12px; color: #10b981; }
+.chat-header .status.offline { color: #ef4444; }
+
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* 消息气泡 */
+.msg { display: flex; gap: 10px; max-width: 80%; }
+.msg.user { align-self: flex-end; flex-direction: row-reverse; }
+.avatar {
+  width: 32px; height: 32px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; flex-shrink: 0;
+}
+.avatar.user { background: #4f46e5; color: #fff; }
+.avatar.bot { background: #e0e7ff; color: #4f46e5; }
+.bubble {
+  padding: 10px 14px;
+  border-radius: 14px;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.msg.user .bubble { background: #4f46e5; color: #fff; border-top-right-radius: 4px; }
+.msg.bot .bubble { background: #fff; color: #1a1a2e; border: 1px solid #e8e8ed; border-top-left-radius: 4px; }
+
+/* Bot 气泡里的小标签 */
+.bot-meta {
+  margin-top: 6px;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.badge {
+  display: inline-block; padding: 2px 8px; border-radius: 10px;
+  font-size: 11px; font-weight: 500;
+}
+.badge-tech { background: #dbeafe; color: #1e40af; }
+.badge-bill { background: #fef3c7; color: #92400e; }
+.badge-after { background: #dcfce7; color: #166534; }
+.badge-low { background: #e5e7eb; color: #374151; }
+.badge-mid { background: #fef3c7; color: #92400e; }
+.badge-high { background: #fee2e2; color: #b91c1c; }
+.badge-ai { background: #e0e7ff; color: #4f46e5; }
+
+/* 输入区 */
+.chat-input-area {
+  padding: 16px 24px 24px;
+  background: #fff;
+  border-top: 1px solid #e8e8ed;
+}
+.input-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+.chat-input {
+  flex: 1;
+  padding: 12px 14px;
+  border: 1px solid #ddd;
+  border-radius: 12px;
+  font-size: 14px;
+  font-family: inherit;
+  resize: none;
+  outline: none;
+  transition: border-color .2s;
+  max-height: 120px;
+  min-height: 44px;
+}
+.chat-input:focus { border-color: #4f46e5; }
+.send-btn {
+  padding: 11px 24px;
+  background: #4f46e5;
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background .2s;
+}
+.send-btn:hover { background: #4338ca; }
+.send-btn:disabled { background: #a5b4fc; cursor: not-allowed; }
+.error-msg {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: #fee2e2;
+  color: #b91c1c;
+  border-radius: 8px;
+  font-size: 13px;
+  display: none;
+}
+
+/* 空状态 */
+.empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: #999;
+  gap: 12px;
+}
+.empty-state .emoji { font-size: 48px; }
+.empty-state .hint { font-size: 14px; }
+.quick-prompts { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+.quick-prompts button {
+  padding: 8px 14px;
+  background: #fff;
+  border: 1px solid #e8e8ed;
+  border-radius: 20px;
+  font-size: 13px;
+  cursor: pointer;
+  color: #555;
+  transition: all .15s;
+}
+.quick-prompts button:hover { border-color: #4f46e5; color: #4f46e5; }
+
+/* 打字动画 */
+.typing .bubble::after {
+  content: '●●●';
+  animation: dots 1.2s steps(4, end) infinite;
+}
+@keyframes dots {
+  0%, 20% { content: '●'; }
+  40% { content: '●●'; }
+  60%, 100% { content: '●●●'; }
+}
 </style>
 </head>
 <body>
-<div class="container">
-  <h1>智能客服工单分诊</h1>
-  <p class="subtitle">输入一句话描述你的问题，3 个 Agent 自动协作分诊</p>
-  <div class="card">
-    <textarea id="ticketInput" placeholder="例如：我的发票抬头写错了..."></textarea>
-    <button class="btn" id="submitBtn">提交分诊</button>
-    <div class="error" id="errorBox"></div>
+
+<div class="sidebar">
+  <div class="sidebar-header">
+    <h1>🛎️ 智能售后客服</h1>
+    <p>3 Agent 多轮对话 · MCP 工具调用</p>
   </div>
-  <div class="card result" id="resultCard">
-    <h3>分诊结果</h3>
-    <div class="field"><span class="label">工单 ID</span><span class="value" id="rId"></span></div>
-    <div class="field"><span class="label">分类</span><span class="value" id="rCategory"></span></div>
-    <div class="field"><span class="label">优先级</span><span class="value" id="rPriority"></span></div>
-    <div class="field"><span class="label">建议处理人</span><span class="value" id="rAssignee"></span></div>
-    <div class="field"><span class="label">处理建议</span><span class="value" id="rSuggestion"></span></div>
-    <div class="field"><span class="label">处理轨迹</span><span class="value" id="rTrace"></span></div>
+  <button class="new-chat-btn" onclick="newChat()">＋ 新建会话</button>
+  <div class="session-list" id="sessionList"></div>
+</div>
+
+<div class="chat-main">
+  <div class="chat-header">
+    <span class="title" id="chatTitle">新会话</span>
+    <span class="status" id="llmStatus">● LLM 在线</span>
+  </div>
+  <div class="chat-messages" id="messages">
+    <div class="empty-state" id="emptyState">
+      <div class="emoji">🤖</div>
+      <div class="hint">你好！我是智能售后客服，可以帮你处理：</div>
+      <div class="quick-prompts">
+        <button onclick="sendQuick('我的发票抬头写错了')">发票抬头错了</button>
+        <button onclick="sendQuick('那个退费怎么还没到')">退费没收到</button>
+        <button onclick="sendQuick('app 打不开一直闪退')">App 闪退</button>
+        <button onclick="sendQuick('快递SF1234567890到哪了')">查快递</button>
+        <button onclick="sendQuick('上海今天天气怎么样')">查天气</button>
+      </div>
+    </div>
+  </div>
+  <div class="chat-input-area">
+    <div class="input-row">
+      <textarea class="chat-input" id="msgInput" placeholder="描述你的问题，按 Enter 发送，Shift+Enter 换行..." rows="1"></textarea>
+      <button class="send-btn" id="sendBtn" onclick="sendMessage()">发送</button>
+    </div>
+    <div class="error-msg" id="errorBox"></div>
   </div>
 </div>
+
 <script>
-const input = document.getElementById('ticketInput');
-const btn = document.getElementById('submitBtn');
-const errBox = document.getElementById('errorBox');
-const resultCard = document.getElementById('resultCard');
+let currentSessionId = localStorage.getItem('currentSessionId') || null;
+let sessions = [];
 
-function showError(msg) { errBox.textContent = msg; errBox.style.display = 'block'; }
-function hideError() { errBox.style.display = 'none'; }
-
-function badgeClass(cat) {
-  if (cat === '技术') return 'badge-tech';
-  if (cat === '账单') return 'badge-bill';
-  if (cat === '售后') return 'badge-after';
-  return 'badge-low';
-}
-function priClass(p) {
-  if (p === '高') return 'badge-high';
-  if (p === '中') return 'badge-mid';
-  return 'badge-low';
+// ===== 初始化 =====
+async function init() {
+  await loadLLMStatus();
+  await loadSessions();
+  if (currentSessionId) {
+    await loadSessionMessages(currentSessionId);
+  }
+  setupInput();
 }
 
-btn.addEventListener('click', async () => {
-  const text = input.value.trim();
-  hideError();
-  resultCard.style.display = 'none';
-  if (!text) { showError('请输入工单内容，不能为空'); return; }
-  btn.disabled = true; btn.textContent = '处理中...';
+async function loadLLMStatus() {
   try {
-    const resp = await fetch('/triage', {
+    const r = await fetch('/health');
+    const d = await r.json();
+    const el = document.getElementById('llmStatus');
+    if (d.llm_enabled) {
+      el.textContent = '● LLM 在线 (' + d.llm_model + ')';
+      el.style.color = '#10b981';
+    } else {
+      el.textContent = '● LLM 未启用（降级模式）';
+      el.className = 'status offline';
+    }
+  } catch {}
+}
+
+async function loadSessions() {
+  try {
+    const r = await fetch('/chat/sessions');
+    sessions = await r.json();
+    renderSessionList();
+  } catch {}
+}
+
+function renderSessionList() {
+  const list = document.getElementById('sessionList');
+  if (sessions.length === 0) {
+    list.innerHTML = '<div style="padding:16px;font-size:12px;color:#666;text-align:center;">暂无会话</div>';
+    return;
+  }
+  list.innerHTML = sessions.map(s => `
+    <div class="session-item ${s.session_id === currentSessionId ? 'active' : ''}" onclick="switchSession('${s.session_id}')">
+      <span class="session-title" title="${s.title}">${s.title}</span>
+      <span class="session-count">${s.message_count}</span>
+    </div>
+  `).join('');
+}
+
+async function loadSessionMessages(sessionId) {
+  try {
+    const r = await fetch('/chat/sessions/' + sessionId);
+    const d = await r.json();
+    currentSessionId = sessionId;
+    localStorage.setItem('currentSessionId', sessionId);
+    document.getElementById('chatTitle').textContent = d.session.title;
+    document.getElementById('emptyState').style.display = 'none';
+    const container = document.getElementById('messages');
+    container.innerHTML = '';
+    d.messages.forEach(m => appendBubble(m.role === 'user' ? 'user' : 'bot', m.content, {
+      category: m.category, suggestion: m.suggestion
+    }));
+    renderSessionList();
+  } catch {}
+}
+
+async function switchSession(id) {
+  await loadSessionMessages(id);
+}
+
+async function newChat() {
+  currentSessionId = null;
+  localStorage.removeItem('currentSessionId');
+  document.getElementById('chatTitle').textContent = '新会话';
+  document.getElementById('messages').innerHTML = '';
+  document.getElementById('emptyState').style.display = 'flex';
+  document.getElementById('msgInput').value = '';
+  renderSessionList();
+}
+
+// ===== 发送消息 =====
+function setupInput() {
+  const input = document.getElementById('msgInput');
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+  input.addEventListener('input', () => {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+  });
+}
+
+function appendBubble(role, content, meta = {}) {
+  document.getElementById('emptyState').style.display = 'none';
+  const container = document.getElementById('messages');
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  const avatar = role === 'user' ? '👤' : '🤖';
+  div.innerHTML = `
+    <div class="avatar ${role}">${avatar}</div>
+    <div>
+      <div class="bubble">${content}</div>
+      ${role === 'bot' && meta.category ? `
+        <div class="bot-meta">
+          <span class="badge badge-${meta.category === '技术' ? 'tech' : meta.category === '账单' ? 'bill' : 'after'}">${meta.category}</span>
+          ${meta.suggestion && meta.suggestion.includes('AI 生成') ? '<span class="badge badge-ai">AI</span>' : ''}
+        </div>` : ''}
+    </div>
+  `;
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
+async function sendMessage() {
+  const input = document.getElementById('msgInput');
+  const text = input.value.trim();
+  const errBox = document.getElementById('errorBox');
+  errBox.style.display = 'none';
+  if (!text) { errBox.textContent = '请输入消息内容'; errBox.style.display = 'block'; return; }
+
+  appendBubble('user', text);
+  input.value = '';
+  input.style.height = 'auto';
+  document.getElementById('sendBtn').disabled = true;
+
+  // 打字指示
+  const typingDiv = document.createElement('div');
+  typingDiv.className = 'msg bot typing';
+  typingDiv.innerHTML = `<div class="avatar bot">🤖</div><div class="bubble"></div>`;
+  document.getElementById('messages').appendChild(typingDiv);
+  const container = document.getElementById('messages');
+  container.scrollTop = container.scrollHeight;
+
+  try {
+    const body = { content: text };
+    if (currentSessionId) body.session_id = currentSessionId;
+    const r = await fetch('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: text })
+      body: JSON.stringify(body)
     });
-    if (!resp.ok) {
-      const d = await resp.json().catch(() => ({}));
-      showError(d.detail || `请求失败 (${resp.status})`);
+    typingDiv.remove();
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      appendBubble('bot', '❌ ' + (d.detail || '请求失败'));
       return;
     }
-    const d = await resp.json();
-    document.getElementById('rId').textContent = d.ticket_id;
-    document.getElementById('rCategory').innerHTML = '<span class="badge ' + badgeClass(d.category) + '">' + d.category + '</span>';
-    document.getElementById('rPriority').innerHTML = '<span class="badge ' + priClass(d.priority) + '">' + d.priority + '</span>';
-    document.getElementById('rAssignee').textContent = d.assignee;
-    document.getElementById('rSuggestion').textContent = d.suggestion;
-    document.getElementById('rTrace').textContent = d.trace.join(' → ');
-    resultCard.style.display = 'block';
+    const d = await r.json();
+    currentSessionId = d.session_id;
+    localStorage.setItem('currentSessionId', d.session_id);
+    appendBubble('bot', d.reply, { category: d.category, suggestion: d.reply });
+    document.getElementById('chatTitle').textContent = d.reply.split('\n')[0].slice(0, 20) || '新会话';
+    await loadSessions();
   } catch (e) {
-    showError('网络错误：' + e.message);
+    typingDiv.remove();
+    appendBubble('bot', '❌ 网络错误：' + e.message);
   } finally {
-    btn.disabled = false; btn.textContent = '提交分诊';
+    document.getElementById('sendBtn').disabled = false;
+    input.focus();
   }
-});
+}
+
+function sendQuick(text) {
+  document.getElementById('msgInput').value = text;
+  sendMessage();
+}
+
+init();
 </script>
 </body>
 </html>
