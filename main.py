@@ -158,11 +158,46 @@ def _build_suggestion(category: str, content: str) -> str:
     return "请提供订单号及问题商品信息，售后专员将在 24 小时内联系你处理。"
 
 
+def _try_mcp_tools(content: str) -> Optional[str]:
+    """尝试通过 MCP 调用外部工具，返回工具输出（None 表示不适用）"""
+    from mcp_server import call_tool_sync
+
+    # --- 天气 Tool ---
+    if any(kw in content for kw in ("天气", "下雨", "出门", "带伞", "气温", "冷不冷", "热不热")):
+        city_match = re.search(r"([\u4e00-\u9fa5]{2,4})(?:的?天气|市|省|区)", content)
+        if not city_match:
+            city_match = re.search(
+                r"(北京|上海|广州|深圳|杭州|成都|武汉|南京|西安|重庆|天津|苏州)", content
+            )
+        city = city_match.group(1) if city_match else "北京"
+        result = call_tool_sync("query_weather", {"city": city})
+        if result:
+            return f"【MCP · 天气查询】{result}"
+
+    # --- 快递 Tool ---
+    tracking_match = re.search(r"([A-Za-z0-9]{8,20})", content)
+    tracking_kw = any(kw in content for kw in ("快递", "物流", "到哪", "发货", "包裹", "运单", "单号"))
+    if tracking_match or tracking_kw:
+        tracking_no = tracking_match.group(1) if tracking_match else "SF1234567890"
+        result = call_tool_sync("query_express", {"tracking_no": tracking_no})
+        if result:
+            return f"【MCP · 快递查询】\n{result}"
+
+    return None
+
+
 def specialist_agent(category: str, content: str) -> Dict[str, str]:
-    """专员 Agent：根据类型提取信息并生成初步建议"""
+    """专员 Agent：根据类型提取信息并生成初步建议，支持 MCP 外部 Tool"""
     priority = _calc_priority(content)
     assignee = ASSIGNEE_MAP[category]
+
+    # 先尝试调 MCP Tool，拿到真实外部数据
+    mcp_data = _try_mcp_tools(content)
+
     suggestion = _build_suggestion(category, content)
+    if mcp_data:
+        suggestion = f"{mcp_data}\n\n📋 标准处理建议：\n{suggestion}"
+
     return {
         "category": category,
         "priority": priority,
@@ -273,10 +308,11 @@ def triage(req: TriageRequest):
 
 @app.get("/health")
 def health():
+    from mcp_server import list_tools_sync
     conn = _get_conn()
     count = conn.execute("SELECT COUNT(*) FROM tickets").fetchone()[0]
     conn.close()
-    return {"status": "ok", "tickets": count, "db": _DB_PATH}
+    return {"status": "ok", "tickets": count, "db": _DB_PATH, "mcp_tools": list_tools_sync()}
 
 
 @app.get("/tickets/{ticket_id}")
