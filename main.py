@@ -435,6 +435,7 @@ def health():
         "mcp_tools": list_tools_sync(),
         "llm_enabled": _HAS_LLM,
         "llm_model": LLM_MODEL if _HAS_LLM else None,
+        "llm_key_len": len(LLM_API_KEY) if LLM_API_KEY else 0,  # debug: 看 Key 到底有没有注入
     }
 
 
