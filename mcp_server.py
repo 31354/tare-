@@ -10,7 +10,7 @@ import random
 from typing import Annotated
 
 import httpx
-from mcp.server.mcpserver import MCPServer
+from mcp.server import MCPServer
 
 mcp = MCPServer("售后客服 MCP Server")
 
