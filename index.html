@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>智能客服工单分诊系统</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background: #f5f7fa; min-height: 100vh; display: flex; justify-content: center; padding: 40px 16px; }
+  .container { width: 100%; max-width: 640px; }
+  h1 { font-size: 24px; color: #1a1a2e; margin-bottom: 8px; }
+  .subtitle { color: #666; font-size: 14px; margin-bottom: 24px; }
+  .card { background: #fff; border-radius: 12px; padding: 24px; box-shadow: 0 2px 12px rgba(0,0,0,.08); margin-bottom: 20px; }
+  textarea { width: 100%; min-height: 96px; padding: 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; resize: vertical; outline: none; transition: border-color .2s; }
+  textarea:focus { border-color: #4f46e5; }
+  .btn { margin-top: 12px; padding: 10px 24px; background: #4f46e5; color: #fff; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; transition: background .2s; }
+  .btn:hover { background: #4338ca; }
+  .btn:disabled { background: #a5b4fc; cursor: not-allowed; }
+  .error { margin-top: 12px; padding: 10px 12px; background: #fee2e2; color: #b91c1c; border-radius: 8px; font-size: 13px; display: none; }
+  .result { display: none; }
+  .result h3 { font-size: 16px; color: #1a1a2e; margin-bottom: 16px; }
+  .field { display: flex; padding: 8px 0; border-bottom: 1px solid #f0f0f0; font-size: 14px; }
+  .field:last-child { border-bottom: none; }
+  .field .label { color: #666; width: 90px; flex-shrink: 0; }
+  .field .value { color: #1a1a2e; font-weight: 500; flex: 1; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; }
+  .badge-tech { background: #dbeafe; color: #1e40af; }
+  .badge-bill { background: #fef3c7; color: #92400e; }
+  .badge-after { background: #dcfce7; color: #166534; }
+  .badge-low { background: #e5e7eb; color: #374151; }
+  .badge-mid { background: #fef3c7; color: #92400e; }
+  .badge-high { background: #fee2e2; color: #b91c1c; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>智能客服工单分诊</h1>
+  <p class="subtitle">输入一句话描述你的问题，3 个 Agent 自动协作分诊</p>
+  <div class="card">
+    <textarea id="ticketInput" placeholder="例如：我的发票抬头写错了..."></textarea>
+    <button class="btn" id="submitBtn">提交分诊</button>
+    <div class="error" id="errorBox"></div>
+  </div>
+  <div class="card result" id="resultCard">
+    <h3>分诊结果</h3>
+    <div class="field"><span class="label">工单 ID</span><span class="value" id="rId"></span></div>
+    <div class="field"><span class="label">分类</span><span class="value" id="rCategory"></span></div>
+    <div class="field"><span class="label">优先级</span><span class="value" id="rPriority"></span></div>
+    <div class="field"><span class="label">建议处理人</span><span class="value" id="rAssignee"></span></div>
+    <div class="field"><span class="label">处理建议</span><span class="value" id="rSuggestion"></span></div>
+    <div class="field"><span class="label">处理轨迹</span><span class="value" id="rTrace"></span></div>
+  </div>
+</div>
+<script>
+const input = document.getElementById('ticketInput');
+const btn = document.getElementById('submitBtn');
+const errBox = document.getElementById('errorBox');
+const resultCard = document.getElementById('resultCard');
+
+function showError(msg) { errBox.textContent = msg; errBox.style.display = 'block'; }
+function hideError() { errBox.style.display = 'none'; }
+
+function badgeClass(cat) {
+  if (cat === '技术') return 'badge-tech';
+  if (cat === '账单') return 'badge-bill';
+  if (cat === '售后') return 'badge-after';
+  return 'badge-low';
+}
+function priClass(p) {
+  if (p === '高') return 'badge-high';
+  if (p === '中') return 'badge-mid';
+  return 'badge-low';
+}
+
+btn.addEventListener('click', async () => {
+  const text = input.value.trim();
+  hideError();
+  resultCard.style.display = 'none';
+  if (!text) { showError('请输入工单内容，不能为空'); return; }
+  btn.disabled = true; btn.textContent = '处理中...';
+  try {
+    const resp = await fetch('/triage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: text })
+    });
+    if (!resp.ok) {
+      const d = await resp.json().catch(() => ({}));
+      showError(d.detail || `请求失败 (${resp.status})`);
+      return;
+    }
+    const d = await resp.json();
+    document.getElementById('rId').textContent = d.ticket_id;
+    document.getElementById('rCategory').innerHTML = '<span class="badge ' + badgeClass(d.category) + '">' + d.category + '</span>';
+    document.getElementById('rPriority').innerHTML = '<span class="badge ' + priClass(d.priority) + '">' + d.priority + '</span>';
+    document.getElementById('rAssignee').textContent = d.assignee;
+    document.getElementById('rSuggestion').textContent = d.suggestion;
+    document.getElementById('rTrace').textContent = d.trace.join(' → ');
+    resultCard.style.display = 'block';
+  } catch (e) {
+    showError('网络错误：' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = '提交分诊';
+  }
+});
+</script>
+</body>
+</html>
